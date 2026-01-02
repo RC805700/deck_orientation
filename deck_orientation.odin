@@ -8,6 +8,7 @@ import "core:mem"
 import os "core:os/os2"
 import "core:strings"
 import "core:sys/linux"
+import "core:sys/posix"
 import "core:time"
 
 HIDIOCGRAWINFO :: 0x80084803
@@ -236,8 +237,13 @@ main :: proc() {
 	pending_orientation: Orientation = .ORIENT_HORIZONTAL
 	pending_since: time.Stopwatch
 	touch_cmd := [4]string{"xinput", "--map-to-output", "pointer:FTS3528:00 2808:1015", "eDP"}
+	looptime: time.Time
 
-	for {
+	pollfd: posix.pollfd = {
+		fd     = posix.FD(os.fd(f)),
+		events = {.IN},
+	}
+	for (posix.poll(&pollfd, 1, 10) >= 0) {
 		n, err := os.read_full(f, buf[:])
 		if err != io.Error.None {
 			fmt.printfln("Read: %d", n)
@@ -289,7 +295,6 @@ main :: proc() {
 			time.stopwatch_reset(&pending_since)
 			// Only apply rotation if this is different from current orientation
 			if (pending_orientation != last_orientation) {
-
 				last_orientation = pending_orientation
 				rotate_x11(last_orientation)
 				run_cmd(touch_cmd[:])
@@ -299,6 +304,7 @@ main :: proc() {
 		}
 
 		time.sleep(time.Millisecond * 9)
+
 	}
 
 
