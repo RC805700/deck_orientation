@@ -10,6 +10,8 @@ import "core:strings"
 import "core:sys/linux"
 import "core:sys/posix"
 import "core:time"
+import "vendor:x11/xlib"
+import "xi"
 
 HIDIOCGRAWINFO :: 0x80084803
 VALVE_VID :: 0x28de
@@ -92,28 +94,26 @@ open_sd_hid :: proc() -> (^os.File, os.Error) {
 	hinfo: Hidraw_Devinfo
 	for info in os.read_directory_iterator(&it) {
 		if (strings.contains(info.fullpath, "hidraw")) {
-			fmt.printfln("Found: %s", info.fullpath)
 			f, err := os.open(info.fullpath, {.Read})
 			defer os.close(f)
+			if err != nil {
+				continue
+			}
 			if (linux.ioctl(linux.Fd(os.fd(f)), HIDIOCGRAWINFO, uintptr(&hinfo)) == 0) {
-				fmt.printfln(
-					"Found HIDRAW: %s — VID=%04hx PID=%04hx\n",
+				log.infof(
+					"Found HIDRAW: %s — VID=%x PID=%x",
 					info.fullpath,
 					hinfo.vendor,
 					hinfo.product,
 				)
 				if (hinfo.vendor == VALVE_VID && hinfo.product == DECK_PID) {
-					fmt.printfln("Steam Deck controller found at %s\n", info.fullpath)
+					log.infof("Steam Deck controller found at %s", info.fullpath)
 					return os.open(info.fullpath, {.Read})
 				}
-
-
 			}
 		}
-
 	}
-
-	return nil, nil
+	return nil, os.General_Error.Not_Exist
 }
 
 is_flat :: proc(ax: f32, ay: f32, az: f32) -> bool {
@@ -173,13 +173,11 @@ run_cmd :: proc(cmd: []string) {
 		//delete(stdout)
 	}
 	if (!ret.success) {
-		fmt.printfln("stderr: %s", stderr)
-		//TODO: Log the error returned
+		log.errorf("stderr: %s", stderr)
 	}
 }
 
-rotate_x11 :: proc(o: Orientation) {
-	output := "eDP"
+rotate_x11 :: proc(o: Orientation, output: string) {
 	rot := "right"
 
 	switch (o) {
@@ -202,6 +200,7 @@ rotate_x11 :: proc(o: Orientation) {
 }
 
 main :: proc() {
+	context.logger = log.create_console_logger()
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
@@ -223,10 +222,53 @@ main :: proc() {
 			mem.tracking_allocator_destroy(&track)
 		}
 	}
+	display := xlib.OpenDisplay(nil)
+	if display == nil {
+		log.errorf("X11 not found")
+		return
+	}
+	defer xlib.CloseDisplay(display)
+	screen := xlib.DefaultScreen(display)
+	root := xlib.RootWindow(display, screen)
+	res := xlib.XRRGetScreenResources(display, root)
+	on: string
+	for routput in res.outputs[:res.noutput] {
+		output_info := xlib.XRRGetOutputInfo(display, res, routput)
+		if strings.contains(string(output_info.name), "eDP") {
+			on = string(output_info.name)
+		}
+	}
+	if len(on) < 3 {
+		log.error("Failed to get display name")
+		return
+	}
+	ndevices: i32
+	qdev := xi.XIQueryDevice(display, xlib.XIAllDevices, &ndevices)
+	if qdev == nil {
+		log.error("Failed to get touch device")
+		// Handle error (e.g., BadDevice)
+		return
+	}
+	defer xi.XIFreeDeviceInfo(qdev)
 
-	f, _ := open_sd_hid()
+	pointer: string
+	// Now iterate over the devices
+	devs := ([^]xi.XIDeviceInfo)(qdev)[:ndevices]
+	for d in devs {
+		if (d.use == xi.Use.MasterPointer || d.use == xi.Use.SlavePointer) {
+			if strings.contains(string(d.name), "FTS") {
+				pointer = fmt.tprintf("pointer:%s", string(d.name))
+			}
+		}
+	}
+	f, err := open_sd_hid()
 	defer os.close(f)
-	if f == nil {
+	if err != nil {
+		if err == os.General_Error.Not_Exist {
+			log.error("No hidraw device found")
+		} else {
+			log.errorf("Failed to open hidraw device: %s", err)
+		}
 		return
 	}
 
@@ -236,7 +278,7 @@ main :: proc() {
 	last_orientation: Orientation = .ORIENT_HORIZONTAL
 	pending_orientation: Orientation = .ORIENT_HORIZONTAL
 	pending_since: time.Stopwatch
-	touch_cmd := [4]string{"xinput", "--map-to-output", "pointer:FTS3528:00 2808:1015", "eDP"}
+	touch_cmd := [4]string{"xinput", "--map-to-output", pointer, on}
 	looptime: time.Time
 
 	pollfd: posix.pollfd = {
@@ -246,7 +288,7 @@ main :: proc() {
 	for (posix.poll(&pollfd, 1, 10) >= 0) {
 		n, err := os.read_full(f, buf[:])
 		if err != io.Error.None {
-			fmt.printfln("Read: %d", n)
+			log.errorf("Got a error reading hidraw device: %s", err)
 			continue
 		}
 
@@ -296,7 +338,7 @@ main :: proc() {
 			// Only apply rotation if this is different from current orientation
 			if (pending_orientation != last_orientation) {
 				last_orientation = pending_orientation
-				rotate_x11(last_orientation)
+				rotate_x11(last_orientation, on)
 				run_cmd(touch_cmd[:])
 			}
 
