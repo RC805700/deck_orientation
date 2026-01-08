@@ -13,6 +13,9 @@ import "core:time"
 import "vendor:x11/xlib"
 import "xi"
 
+// to pass vet
+_ :: mem
+
 HIDIOCGRAWINFO :: 0x80084803
 VALVE_VID :: 0x28de
 DECK_PID :: 0x1205
@@ -94,9 +97,9 @@ open_sd_hid :: proc() -> (^os.File, os.Error) {
 	hinfo: Hidraw_Devinfo
 	for info in os.read_directory_iterator(&it) {
 		if (strings.contains(info.fullpath, "hidraw")) {
-			f, err := os.open(info.fullpath, {.Read})
+			f, err2 := os.open(info.fullpath, {.Read})
 			defer os.close(f)
-			if err != nil {
+			if err2 != nil {
 				continue
 			}
 			if (linux.ioctl(linux.Fd(os.fd(f)), HIDIOCGRAWINFO, uintptr(&hinfo)) == 0) {
@@ -279,15 +282,14 @@ main :: proc() {
 	pending_orientation: Orientation = .ORIENT_HORIZONTAL
 	pending_since: time.Stopwatch
 	touch_cmd := [4]string{"xinput", "--map-to-output", pointer, on}
-	looptime: time.Time
 
 	pollfd: posix.pollfd = {
 		fd     = posix.FD(os.fd(f)),
 		events = {.IN},
 	}
 	for (posix.poll(&pollfd, 1, 10) >= 0) {
-		n, err := os.read_full(f, buf[:])
-		if err != io.Error.None {
+		n, err2 := os.read_full(f, buf[:])
+		if err2 != io.Error.None || n < 64 {
 			log.errorf("Got a error reading hidraw device: %s", err)
 			continue
 		}

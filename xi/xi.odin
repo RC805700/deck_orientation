@@ -1,6 +1,5 @@
 package xi
 
-import "core:c"
 import xlib "vendor:x11/xlib"
 
 // Foreign import for libXi (X Input Extension)
