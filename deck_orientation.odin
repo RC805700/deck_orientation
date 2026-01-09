@@ -12,6 +12,7 @@ import "core:sys/posix"
 import "core:time"
 import "vendor:x11/xlib"
 import "xi"
+import "xrandr"
 
 // to pass vet
 _ :: mem
@@ -180,26 +181,96 @@ run_cmd :: proc(cmd: []string) {
 	}
 }
 
-rotate_x11 :: proc(o: Orientation, output: string) {
-	rot := "right"
+rotate_x11 :: proc(
+	o: Orientation,
+	output: xlib.XID,
+	display: ^xlib.Display,
+	root: xlib.Window,
+	resources: ^xlib.XRRScreenResources,
+) {
+	output_info := xlib.XRRGetOutputInfo(display, resources, output)
+	crtc_info := xlib.XRRGetCrtcInfo(display, resources, output_info.crtc)
+	if crtc_info == nil {
+		log.error("Failed to get CRTC info")
+		return
+	}
+	defer xlib.XRRFreeCrtcInfo(crtc_info)
+
+	xrot: xlib.Rotation = .Rotate_270
+	inverted: bool = false
+
+	new_width: i32 = i32(crtc_info.width)
+	new_height: i32 = i32(crtc_info.height)
+	mm_width: i32 = i32(output_info.mm_width)
+	mm_height: i32 = i32(output_info.mm_height)
 
 	switch (o) {
 	case .ORIENT_HORIZONTAL:
-		rot = "right"
+		if (crtc_info.rotation == .Rotate_0 || crtc_info.rotation == .Rotate_180) {
+			inverted = true
+			new_width = i32(crtc_info.height)
+			new_height = i32(crtc_info.width)
+			mm_width = i32(output_info.mm_height)
+			mm_height = i32(output_info.mm_width)
+		}
+		//"right"
+		xrot = .Rotate_270
 		break
 	case .ORIENT_HORIZONTAL_INVERTED:
-		rot = "left"
+		if (crtc_info.rotation == .Rotate_0 || crtc_info.rotation == .Rotate_180) {
+			inverted = true
+			new_width = i32(crtc_info.height)
+			new_height = i32(crtc_info.width)
+			mm_width = i32(output_info.mm_height)
+			mm_height = i32(output_info.mm_width)
+		}
+		//"left"
+		xrot = .Rotate_90
 		break
 	case .ORIENT_VERTICAL:
-		rot = "inverted"
+		if (crtc_info.rotation == .Rotate_90 || crtc_info.rotation == .Rotate_270) {
+			inverted = true
+			new_width = i32(crtc_info.height)
+			new_height = i32(crtc_info.width)
+			mm_width = i32(output_info.mm_height)
+			mm_height = i32(output_info.mm_width)
+		}
+		//"inverted"
+		xrot = .Rotate_180
 		break
 	case .ORIENT_VERTICAL_INVERTED:
-		rot = "normal"
+		if (crtc_info.rotation == .Rotate_90 || crtc_info.rotation == .Rotate_270) {
+			inverted = true
+			new_width = i32(crtc_info.height)
+			new_height = i32(crtc_info.width)
+			mm_width = i32(output_info.mm_height)
+			mm_height = i32(output_info.mm_width)
+		}
+		//"normal"
+		xrot = .Rotate_0
 		break
 	}
 
-	cmd := [5]string{"xrandr", "--output", output, "--rotate", rot}
-	run_cmd(cmd[:])
+	status := xrandr.XRRSetCrtcConfig(
+		display,
+		resources,
+		output_info.crtc,
+		xlib.CurrentTime,
+		crtc_info.x,
+		crtc_info.y,
+		crtc_info.mode,
+		xrot,
+		crtc_info.outputs,
+		crtc_info.noutput,
+	)
+	if status != .Success {
+		log.error("Failed to apply rotation")
+		return
+	}
+	if inverted {
+		xrandr.XRRSetScreenSize(display, root, new_width, new_height, mm_width, mm_height)
+	}
+	xlib.Sync(display, false)
 }
 
 main :: proc() {
@@ -227,7 +298,7 @@ main :: proc() {
 	}
 	display := xlib.OpenDisplay(nil)
 	if display == nil {
-		log.errorf("X11 not found")
+		log.error("X11 not found")
 		return
 	}
 	defer xlib.CloseDisplay(display)
@@ -235,10 +306,12 @@ main :: proc() {
 	root := xlib.RootWindow(display, screen)
 	res := xlib.XRRGetScreenResources(display, root)
 	on: string
+	rout: xlib.XID
 	for routput in res.outputs[:res.noutput] {
 		output_info := xlib.XRRGetOutputInfo(display, res, routput)
 		if strings.contains(string(output_info.name), "eDP") {
 			on = string(output_info.name)
+			rout = routput
 		}
 	}
 	if len(on) < 3 {
@@ -249,7 +322,6 @@ main :: proc() {
 	qdev := xi.XIQueryDevice(display, xlib.XIAllDevices, &ndevices)
 	if qdev == nil {
 		log.error("Failed to get touch device")
-		// Handle error (e.g., BadDevice)
 		return
 	}
 	defer xi.XIFreeDeviceInfo(qdev)
@@ -264,6 +336,7 @@ main :: proc() {
 			}
 		}
 	}
+
 	f, err := open_sd_hid()
 	defer os.close(f)
 	if err != nil {
@@ -340,7 +413,7 @@ main :: proc() {
 			// Only apply rotation if this is different from current orientation
 			if (pending_orientation != last_orientation) {
 				last_orientation = pending_orientation
-				rotate_x11(last_orientation, on)
+				rotate_x11(last_orientation, rout, display, root, res)
 				run_cmd(touch_cmd[:])
 			}
 
@@ -350,6 +423,4 @@ main :: proc() {
 		time.sleep(time.Millisecond * 9)
 
 	}
-
-
 }
