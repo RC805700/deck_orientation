@@ -8,7 +8,6 @@ An Odin program that provides automatic screen rotation for the Steam Deck based
 - Steam Deck Lcd
 - X11 development libraries
 - Xi extension (X Input Extension)
-- xrandr
 - xinput
 
 ## Building
